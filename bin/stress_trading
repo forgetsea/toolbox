@@ -290,6 +290,84 @@ def become_billionaire(trader)
     url = URI.join(@root_url, '/management_api/v1/deposits/new')
     Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
   end
+
+  # random deposit and withdraw
+  i = 0 
+  loop_round = 1
+  loop do
+    @currencies.each do |currency|
+      interval = rand(1...2) 
+      puts "sleep #{interval} secs"
+      amount = rand(11.2...76.9).round(2)
+      puts "depost amount: #{amount} to uid: #{trader[:uid]} with currency: #{currency}"
+      sleep(interval)
+      keychain   = { @management_api_v1_jwt_signer => @management_api_v1_jwt_key }
+      algorithms = { @management_api_v1_jwt_signer => @management_api_v1_jwt_algorithm }
+      data       = { uid: trader[:uid], currency: currency, amount: amount, state: :accepted }
+      payload    = { iat:  Time.now.to_i,
+                     exp:  5.minutes.from_now.to_i,
+                     jti:  SecureRandom.uuid,
+                     iss:  @management_api_v1_jwt_signer,
+                     data: data }
+      jwt        = JWT::Multisig.generate_jwt(payload, keychain, algorithms)
+      url = URI.join(@root_url, '/management_api/v1/deposits/new')
+      Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
+      #withdraw 
+      puts "sleep #{interval} secs"
+      amount = rand(5.5 ... 11.2).round(2)
+      puts "withdraw amount: #{amount} to uid: #{trader[:uid]} with currency: #{currency}"
+      tid = SecureRandom.random_number(10000000)
+      sleep(interval)
+      keychain   = { @management_api_v1_jwt_signer => @management_api_v1_jwt_key }
+      algorithms = { @management_api_v1_jwt_signer => @management_api_v1_jwt_algorithm }
+      #data       = { uid: trader[:uid], currency: currency, amount: 1_000_000_000, state: :accepted }
+      data       = { uid: trader[:uid], currency: currency, amount: amount, state: :accepted, action: 'process', rid: 2, tid: tid}
+      payload    = { iat:  Time.now.to_i,
+                     exp:  5.minutes.from_now.to_i,
+                     jti:  SecureRandom.uuid,
+                     iss:  @management_api_v1_jwt_signer,
+                     data: data }
+      jwt        = JWT::Multisig.generate_jwt(payload, keychain, algorithms)
+      url = URI.join(@root_url, '/management_api/v1/withdraws/new')
+      Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
+    end
+    i += 1;
+    if i == loop_round
+      break
+    end
+  end
+end
+
+def dump_data(trader)
+  keychain   = { @management_api_v1_jwt_signer => @management_api_v1_jwt_key }
+  algorithms = { @management_api_v1_jwt_signer => @management_api_v1_jwt_algorithm }
+  data       = { uid: trader[:uid] }
+  payload    = { iat:  Time.now.to_i,
+                 exp:  5.minutes.from_now.to_i,
+                 jti:  SecureRandom.uuid,
+                 iss:  @management_api_v1_jwt_signer,
+                 data: data }
+  jwt        = JWT::Multisig.generate_jwt(payload, keychain, algorithms)
+
+  #url = URI.join(@root_url, '/management_api/v1/timestamp')
+  #Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
+
+  url = URI.join(@root_url, '/management_api/v1/dump/orders')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
+  url = URI.join(@root_url, '/management_api/v1/dump/trades')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
+  url = URI.join(@root_url, '/management_api/v1/integrity')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
 end
 
 def order_created(time)
@@ -408,5 +486,7 @@ def run
   install_handlers_for_process_signals
   @launched_at = Time.now
   create_and_run_workers
+  Kernel.print 'Dump orders and trades... '
+  traders.each(&method(:dump_data))
   @completed_at = Time.now
 end
