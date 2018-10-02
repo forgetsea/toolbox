@@ -13,10 +13,11 @@ options:
   - :VET
   nb_concurent_traders: 2
   nb_concurent_orders: 2
-  started_at: 2018-10-02 11:10:20.429612332 -04:00
-  completed_at: 2018-10-02 11:10:20.429614184 -04:00
+  transfers_created: 16
+  started_at: 2018-10-02 15:55:16.099099991 -04:00
+  completed_at: 2018-10-02 15:55:46.549257656 -04:00
 results:
-  ops: 441505.6842105263
+  ops: 0.525448773812311
   times:
     min: 
     max: 

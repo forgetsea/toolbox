@@ -96,7 +96,7 @@ command :run do |c|
     run
     compute_report
     output_report_yaml(options.report_yaml)
-    Kernel.puts "%.2f orders per second." % [@report['results']['ops']]
+    Kernel.puts "%.2f transfer per second." % [@report['results']['ops']]
   end
 end
 
@@ -153,11 +153,17 @@ def configure_management_api_v1(jwt_key, jwt_signer, jwt_algorithm)
 end
 
 def configure_ico
-  @distributtor = {
+  @distributor = {
     email: 'xiaoma864@gmail.com',
     uid: 'ID1111111111',
     state: 'active',
     level: 3
+  }
+  @admin = {
+    email: 'admin@barong.io',
+    uid: 'ID0000000000',
+    state: 'active',
+    level: '3'
   }
   @distribute_coin = 'btc'
   @ico_types = %i[panic_ico subscribe_ico]
@@ -165,7 +171,7 @@ def configure_ico
   @ico_packages_number = 10
   @ico_offers_number = 2
   @exchange_rates_number = 10
-  peatio_api_v2_get('members/me', jwt: api_v1_jwt_for(@distributtor))
+  peatio_api_v2_get('members/me', jwt: api_v1_jwt_for(@distributor))
 end
 
 def unique_email
@@ -186,7 +192,7 @@ end
 def api_v1_get(path, query: {}, headers: {}, jwt: nil)
   headers['Authorization'] = 'Bearer ' + jwt if jwt
   url = URI.join(@applogic_url, '/api/v1/', path.gsub(/\A\/+/, ''))
-  Faraday.get(url, query, headers).assert_success!.body
+  Faraday.get(url, query, headers).assert_success!
 end
 
 def api_v1_post(path, data: {}, headers: {}, jwt: nil)
@@ -241,28 +247,51 @@ def become_billionaire(trader)
 end
 
 def ico_apply
-  configure_ico
-
-  puts @distributtor
-  ico_packages = []
-  loop do
-    ico_packages << {amount: rand(10..200), whitelist_user_only: 'false', limit: rand(1..15), node_types: '*'}
-    break if ico_packages.size >= @ico_packages_number
+  puts @distributor
+  @currencies.each do |ico_coin|
+    data = {
+      ico_offers: config_ico_offers,
+      exchange_rates: config_exchange_rates(ico_coin),
+      currency_id: ico_coin
+    }
+    api_v1_post('/distributor/apply', data: data , jwt: api_v1_jwt_for(@distributor))
+    data = {
+      currency_id: ico_coin,
+      email: @distributor[:email],
+      action: 'approve'
+    }
+    api_v1_post('/distributor/admin/action', data: data, jwt: api_v1_jwt_for(@admin))
   end
+end
+
+def config_ico_offers
   ico_offers = []
   loop do
     ico_offers << {
       ico_type: :panic_ico,
       limited_volume: 'false',
-      ico_packages: ico_packages
+      ico_packages: config_ico_packages
     }
     break if ico_offers.size >= @ico_offers_number
   end
+  ico_offers
+end
+
+def config_ico_packages
+  ico_packages = []
+  loop do
+    ico_packages << {amount: rand(10..200), whitelist_user_only: 'false', limit: rand(1..15), node_types: '*'}
+    break if ico_packages.size >= @ico_packages_number
+  end
+  ico_packages
+end
+
+def config_exchange_rates (ico_coin)
   exchange_rates = []
   @currencies.each do |currency|
     exchange_rates << {
       src_currency: currency,
-      des_currency: 'btc',
+      des_currency: ico_coin,
       base_rate: rand(0.1..3.5).round(2),
       rate_type: @rate_types.sample,
       rate_adjustors: [
@@ -276,39 +305,24 @@ def ico_apply
       ]
     }
   end
-  data = {
-    ico_offers: ico_offers,
-    exchange_rates: exchange_rates,
-    currency_id: @distribute_coin
-  }
-  # Issue GET /api/v1/members/me to register user at applogic.
-  api_v1_post('/distributor/apply', data: data , jwt: api_v1_jwt_for(@distributtor))
-  @admin = {
-      email: 'admin@barong.io',
-      uid: 'ID0000000000',
-      state: 'active',
-      level: '3'
-  }
-  data = {
-    currency_id: 'btc',
-    email: @distributtor[:email],
-    action: 'approve'
-  }
-  api_v1_post('/distributor/admin/action', data: data, jwt: api_v1_jwt_for(@admin))
+  exchange_rates
 end
 
 def ico_purchase(trader)
-  data = {
-    debit_currency: 'usd',
-    credit_currency: @distribute_coin,
-    amount: rand(200..500),
-    ico_type: :panic_ico,
-    deposit_address: 'a'
-  }
-  sleep(rand(1..2))
-  @created_transfers_number += 1
-  puts 'To purchase' + data.to_s
-  puts api_v1_post('/purchase/package/amount', data: data, jwt: api_v1_jwt_for(trader))
+  @currencies.each do |currency|
+    data = {
+      debit_currency: 'usd',
+      credit_currency: currency,
+      amount: rand(200..500),
+      ico_type: :panic_ico,
+      deposit_address: 'a'
+    }
+    sleep(rand(1..2))
+    @created_transfers_number += 1
+    puts 'To purchase' + data.to_s
+    puts 'Rsponse: '
+    puts api_v1_post('/purchase/package/amount', data: data, jwt: api_v1_jwt_for(trader))
+  end
 end
 
 def dump_data(trader)
@@ -329,16 +343,7 @@ def dump_data(trader)
   resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
   puts resp.body.to_s
 
-  url = URI.join(@peatio_url, '/management_api/v1/dump/trades')
-  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
-  puts resp.body.to_s
-
-  url = URI.join(@peatio_url, '/management_api/v1/integrity')
-  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
-  puts resp.body.to_s
-  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
-  puts resp.body.to_s
-  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  resp = api_v1_get('/purchases/me?currency_id=&ico_type=panic_ico', jwt: api_v1_jwt_for(trader))
   puts resp.body.to_s
 
 end
@@ -352,17 +357,18 @@ def compute_report
       'currencies' => @currencies.map(&:upcase),
       'nb_concurent_traders' =>  @traders_number,
       'nb_concurent_orders' => @threads_number,
+      'transfers_created' => @created_transfers_number,
       'started_at' => @launched_at,
       'completed_at' => @completed_at,
     },
     'results' => {
       'ops' => ops,
-        'times' => {
-          'min' => @times_min,
-            'max' => @times_max,
-            'avg' => @times_total / @times_count,
-        }
-    },
+      'times' => {
+        'min' => @times_min,
+        'max' => @times_max,
+        'avg' => @times_total / @times_count,
+      }
+    }
   }
 end
 
@@ -387,10 +393,11 @@ def run
   Kernel.print 'Making each trader billionaire... '
   traders.each(&method(:become_billionaire))
   Kernel.puts 'purchase ico package'
-  traders.each(&method(:ico_purchase))
-  Kernel.puts 'done'
-
   @launched_at = Time.now
+  traders.each(&method(:ico_purchase))
+  Kernel.puts 'Purchase done'
+  traders.each(&method(:dump_data))
+
   @completed_at = Time.now
 end
 
