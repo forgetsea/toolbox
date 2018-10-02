@@ -4,4 +4,4 @@ export JWT_V1_SHARED_SECRET_KEY=LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlF
 
 #docker run -it --rm rubykube/toolbox bin/stress_trading --root-url http://35.227.82.79 --api-v2-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-signer "applogic" --currencies uah,usd,eur --markets uahusd,uaheur --orders 1000 --traders 10 --threads 10 --report-yaml results.yml
 #docker run -it --rm rubykube/toolbox bash
-bin/peatio_ico --root-url http://0.0.0.0:8000 --api-v2-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-signer "applogic" --currencies btc,usd,xrp --markets btcusd,usdxrp --orders 20 --traders 2 --threads 2 --report-yaml results.yml
+bin/applogic_ico --applogic-url http://0.0.0.0:3080 --peatio-url http://0.0.0.0:8000 --api-v2-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-key $JWT_V2_SHARED_SECRET_KEY --management-api-v1-jwt-signer "applogic"  --traders 2 --threads 2 --report-yaml results.yml

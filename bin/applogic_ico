@@ -1,0 +1,397 @@
+#!/usr/bin/env ruby
+
+# encoding: UTF-8
+# frozen_string_literal: true
+
+require 'openssl'
+require 'base64'
+require 'uri'
+require 'securerandom'
+require 'thread'
+require 'bundler'
+require 'date'
+Bundler.require :default, :cli
+
+extend Memoist
+
+module Faraday
+  class Env
+    attr_reader :request_body
+  end
+
+  class Connection
+    alias original_run_request run_request
+
+    def run_request(method, url, body, headers, &block)
+      original_run_request(method, url, body, headers, &block).tap do |response|
+        response.env.instance_variable_set :@request_body, body if body
+      end
+    end
+  end
+
+  class Response
+    def assert_success!
+      return self if success?
+      raise Faraday::Error, describe
+    end
+
+    def describe
+      ["-- HTTP #{status} #{reason_phrase} --",
+       "",
+       "-- Request URL --",
+       env.url.to_s,
+       "",
+       "-- Request Method --",
+       env.method.to_s.upcase,
+       "",
+       "-- Request headers --",
+       env.request_headers.to_json,
+       "",
+       "-- Request body --",
+       env.request_body.to_s,
+       "",
+       "-- Response headers --",
+       env.response_headers.to_json,
+       "",
+       "-- Response body --",
+       env.body.to_s,
+       ""
+      ].join("\n")
+    end
+  end
+end
+
+program :name,        'stress_trading'
+program :description, 'Ruby script for stress testing Peatio trading engine. See "bin/stress_trading help run".'
+program :version,     '1.0.0'
+default_command       :run
+
+command :run do |c|
+  c.option '--applogic-url URL', String, 'applogic root URL.'
+  c.option '--peatio-url URL', String, 'peatio root URL'
+  c.option '--currencies VALUE', String, 'Comma-separated fiat currencies (at least 2).'
+  c.option '--traders NUMBER', Integer, 'Number of traders (at least 2).'
+  c.option '--threads NUMBER', Integer, 'Number of simultaneous requests.'
+  c.option '--api-v2-jwt-key VALUE', String, 'Private RSA key used for signing JWT in Member API v2. Must be in PEM format URL-safe Base64 encoded.'
+  c.option '--api-v2-jwt-algorithm VALUE', String, 'JWT signing algorithm in Member API v2 (defaults to "RS256").'
+  c.option '--management-api-v1-jwt-key VALUE', String, 'Private RSA key used for signing JWT in Management API v1. Must be in PEM format URL-safe Base64 encoded.'
+  c.option '--management-api-v1-jwt-signer VALUE', String, 'Management API v1 JWT signer name (defaults to "applogic").'
+  c.option '--management-api-v1-jwt-algorithm VALUE', String, 'JWT signing algorithm in Management API v1 (defaults to "RS256").'
+  c.option '--report-yaml VALUE', String, 'Path to store a report in YAML format'
+  c.action do |args, options|
+    options.default threads:                         1,
+                    api_v2_jwt_algorithm:            'RS256',
+                    management_api_v1_jwt_signer:    'applogic',
+                    management_api_v1_jwt_algorithm: 'RS256',
+                    report_yaml:                     "report-#{Time.now.strftime("%F-%H%M%S")}.yml"
+
+    configure_applogic_url(options.applogic_url)
+    configure_peatio_url(options.peatio_url)
+    configure_currencies
+    configure_traders_number(options.traders)
+    configure_threads_number(options.threads)
+    configure_api_v2(options.api_v2_jwt_key, options.api_v2_jwt_algorithm)
+    configure_management_api_v1(options.management_api_v1_jwt_key, options.management_api_v1_jwt_signer, options.management_api_v1_jwt_algorithm)
+    configure_ico
+    run
+    compute_report
+    output_report_yaml(options.report_yaml)
+    Kernel.puts "%.2f orders per second." % [@report['results']['ops']]
+  end
+end
+
+def print_options
+  options = {
+    'Root URL' => @applogic_url.to_s,
+    'Number of simultaneous traders' =>  @traders_number,
+    'Number of simultaneous requests' => @threads_number
+  }
+  length = options.keys.map(&:length).max
+  options.each do |option, value|
+    Kernel.puts "#{(option + ':').ljust(length + 1)} #{value}"
+  end
+end
+
+def configure_applogic_url(applogic_url)
+  raise ArgumentError, 'applogic root URL must be provided.' if applogic_url.blank?
+  @applogic_url = URI.parse(applogic_url)
+end
+
+def configure_peatio_url(peatio_url)
+  raise ArgumentError, 'Peatio root URL must be provided.' if peatio_url.blank?
+  @peatio_url = URI.parse(peatio_url)
+end
+
+def configure_currencies
+  @currencies = %i[btc xrp usd dash bch eth ltc vet]
+end
+
+def configure_traders_number(n)
+  raise ArgumentError, 'Number of traders must be greater than or equal to 2.' if n < 2
+  @traders_number = n
+end
+
+def configure_threads_number(n)
+  raise ArgumentError, 'Number of threads must be at least 1' if n < 1
+  @threads_number = n
+end
+
+def configure_api_v2(jwt_key, jwt_algorithm)
+  raise ArgumentError, 'API v2 private JWT key is missing.' if jwt_key.blank?
+  raise ArgumentError, 'API v2 JWT algorithm is missing.' if jwt_algorithm.blank?
+  @api_v1_jwt_key       = OpenSSL::PKey.read(Base64.urlsafe_decode64(jwt_key))
+  @api_v1_jwt_algorithm = jwt_algorithm
+end
+
+def configure_management_api_v1(jwt_key, jwt_signer, jwt_algorithm)
+  raise ArgumentError, 'Management API v1 private JWT key is missing.' if jwt_key.blank?
+  raise ArgumentError, 'Management API v1 JWT signer is missing.' if jwt_signer.blank?
+  raise ArgumentError, 'Management API v1 JWT algorithm is missing.' if jwt_algorithm.blank?
+  @management_api_v1_jwt_key       = OpenSSL::PKey.read(Base64.urlsafe_decode64(jwt_key))
+  @management_api_v1_jwt_signer    = jwt_signer
+  @management_api_v1_jwt_algorithm = jwt_algorithm
+end
+
+def configure_ico
+  @distributtor = {
+    email: 'xiaoma864@gmail.com',
+    uid: 'ID1111111111',
+    state: 'active',
+    level: 3
+  }
+  @distribute_coin = 'btc'
+  @ico_types = %i[panic_ico subscribe_ico]
+  @rate_types = %i[src_to_des des_to_src]
+  @ico_packages_number = 10
+  @ico_offers_number = 2
+  @exchange_rates_number = 10
+  peatio_api_v2_get('members/me', jwt: api_v1_jwt_for(@distributtor))
+end
+
+def unique_email
+  Faker::Internet.unique.email
+end
+
+def unique_uid
+  @used_uids ||= [].to_set
+  loop do
+    uid = "ID#{SecureRandom.hex(5).upcase}"
+    unless @used_uids.include?(uid)
+      @used_uids << uid
+      return uid
+    end
+  end
+end
+
+def api_v1_get(path, query: {}, headers: {}, jwt: nil)
+  headers['Authorization'] = 'Bearer ' + jwt if jwt
+  url = URI.join(@applogic_url, '/api/v1/', path.gsub(/\A\/+/, ''))
+  Faraday.get(url, query, headers).assert_success!.body
+end
+
+def api_v1_post(path, data: {}, headers: {}, jwt: nil)
+  headers['Authorization'] = 'Bearer ' + jwt if jwt
+  headers['Content-Type']  = 'application/json'
+  url = URI.join(@applogic_url, '/api/v1/', path.gsub(/\A\/+/, ''))
+  Faraday.post(url, data.to_json, headers).assert_success!.body
+end
+
+def api_v1_jwt_for(user, payload = {})
+  payload = payload.dup
+  payload.merge!(user.slice(:email, :uid, :level, :state))
+  payload.reverse_merge! \
+    iat: Time.now.to_i,
+    exp: 5.minutes.from_now.to_i,
+    jti: SecureRandom.uuid,
+    sub: 'session',
+    iss: 'barong',
+    aud: ['peatio', 'barong']
+  JWT.encode(payload, @api_v1_jwt_key, @api_v1_jwt_algorithm)
+end
+
+def peatio_api_v2_get(path, query: {}, headers: {}, jwt: nil)
+  headers['Authorization'] = 'Bearer ' + jwt if jwt
+  url = URI.join(@peatio_url, '/api/v2/', path.gsub(/\A\/+/, ''))
+  Faraday.get(url, query, headers).assert_success!.body
+end
+
+def traders
+  Kernel.print "Creating #{@traders_number} #{'trader'.pluralize(@traders_number)}... "
+  @traders_number.times.map do
+    { email: unique_email, uid: unique_uid, level: 3, state: 'active' }.tap do |trader|
+      # Issue GET /api/v1/members/me to register user at Peatio.
+      peatio_api_v2_get('members/me', jwt: api_v1_jwt_for(trader))
+    end
+  end.tap { Kernel.puts 'OK' }
+end
+memoize :traders
+
+def become_billionaire(trader)
+  keychain   = { @management_api_v1_jwt_signer => @management_api_v1_jwt_key }
+  algorithms = { @management_api_v1_jwt_signer => @management_api_v1_jwt_algorithm }
+  data       = { uid: trader[:uid], currency: :usd, amount: 1_000_000_000, state: :accepted }
+  payload    = { iat:  Time.now.to_i,
+                 exp:  5.minutes.from_now.to_i,
+                 jti:  SecureRandom.uuid,
+                 iss:  @management_api_v1_jwt_signer,
+                 data: data }
+  jwt        = JWT::Multisig.generate_jwt(payload, keychain, algorithms)
+  url = URI.join('http://0.0.0.0:8000', '/management_api/v1/deposits/new')
+  Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
+end
+
+def ico_apply
+  configure_ico
+
+  puts @distributtor
+  ico_packages = []
+  loop do
+    ico_packages << {amount: rand(10..200), whitelist_user_only: 'false', limit: rand(1..15), node_types: '*'}
+    break if ico_packages.size >= @ico_packages_number
+  end
+  ico_offers = []
+  loop do
+    ico_offers << {
+      ico_type: :panic_ico,
+      limited_volume: 'false',
+      ico_packages: ico_packages
+    }
+    break if ico_offers.size >= @ico_offers_number
+  end
+  exchange_rates = []
+  @currencies.each do |currency|
+    exchange_rates << {
+      src_currency: currency,
+      des_currency: 'btc',
+      base_rate: rand(0.1..3.5).round(2),
+      rate_type: @rate_types.sample,
+      rate_adjustors: [
+        {
+          valid_from: DateTime.new(2010,10,10),
+          valid_until: DateTime.new(2020,10,10),
+          adjust_factor: '1.0',
+          minimum_user_level: '1',
+          ico_type: :panic_ico
+        }
+      ]
+    }
+  end
+  data = {
+    ico_offers: ico_offers,
+    exchange_rates: exchange_rates,
+    currency_id: @distribute_coin
+  }
+  # Issue GET /api/v1/members/me to register user at applogic.
+  api_v1_post('/distributor/apply', data: data , jwt: api_v1_jwt_for(@distributtor))
+  @admin = {
+      email: 'admin@barong.io',
+      uid: 'ID0000000000',
+      state: 'active',
+      level: '3'
+  }
+  data = {
+    currency_id: 'btc',
+    email: @distributtor[:email],
+    action: 'approve'
+  }
+  api_v1_post('/distributor/admin/action', data: data, jwt: api_v1_jwt_for(@admin))
+end
+
+def ico_purchase(trader)
+  data = {
+    debit_currency: 'usd',
+    credit_currency: @distribute_coin,
+    amount: rand(200..500),
+    ico_type: :panic_ico,
+    deposit_address: 'a'
+  }
+  sleep(rand(1..2))
+  @created_transfers_number += 1
+  puts 'To purchase' + data.to_s
+  puts api_v1_post('/purchase/package/amount', data: data, jwt: api_v1_jwt_for(trader))
+end
+
+def dump_data(trader)
+  keychain   = { @management_api_v1_jwt_signer => @management_api_v1_jwt_key }
+  algorithms = { @management_api_v1_jwt_signer => @management_api_v1_jwt_algorithm }
+  data       = { uid: trader[:uid] }
+  payload    = { iat:  Time.now.to_i,
+                 exp:  5.minutes.from_now.to_i,
+                 jti:  SecureRandom.uuid,
+                 iss:  @management_api_v1_jwt_signer,
+                 data: data }
+  jwt        = JWT::Multisig.generate_jwt(payload, keychain, algorithms)
+
+  #url = URI.join(@applogic_url, '/management_api/v1/timestamp')
+  #Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json').assert_success!
+
+  url = URI.join(@peatio_url, '/management_api/v1/transfers')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
+  url = URI.join(@peatio_url, '/management_api/v1/dump/trades')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
+  url = URI.join(@peatio_url, '/management_api/v1/integrity')
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+  resp = Faraday.post(url, jwt.to_json, 'Content-Type' => 'application/json')
+  puts resp.body.to_s
+
+end
+
+def compute_report
+  ops = @created_transfers_number / (Time.now.to_f - @launched_at.to_f)
+  @report = {
+    'options' => {
+      'applogic_url' => @applogic_url.to_s,
+      'peatio_url' => @peatio_url.to_s,
+      'currencies' => @currencies.map(&:upcase),
+      'nb_concurent_traders' =>  @traders_number,
+      'nb_concurent_orders' => @threads_number,
+      'started_at' => @launched_at,
+      'completed_at' => @completed_at,
+    },
+    'results' => {
+      'ops' => ops,
+        'times' => {
+          'min' => @times_min,
+            'max' => @times_max,
+            'avg' => @times_total / @times_count,
+        }
+    },
+  }
+end
+
+def output_report_yaml(filename)
+  return unless filename
+  File.open(filename, "w") do |f|
+    f.puts YAML.dump(@report)
+  end
+  puts "Report output to #{ filename }"
+end
+
+def run
+  @statistics_mutex = Mutex.new
+  @created_transfers_number = 0
+  @times_min, @times_max, @times_count, @times_total = nil, nil, 0, 0.0
+
+  Kernel.puts '' # Add a little padding.
+  print_options
+  Kernel.puts 'Initiate ico distributing'
+  ico_apply
+  traders
+  Kernel.print 'Making each trader billionaire... '
+  traders.each(&method(:become_billionaire))
+  Kernel.puts 'purchase ico package'
+  traders.each(&method(:ico_purchase))
+  Kernel.puts 'done'
+
+  @launched_at = Time.now
+  @completed_at = Time.now
+end
+
+
